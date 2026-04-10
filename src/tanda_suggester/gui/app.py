@@ -3,6 +3,49 @@
 from __future__ import annotations
 
 import sys
+
+from tanda_suggester import APP_NAME
+
+# ── macOS: set bundle/process name BEFORE NSApplication is initialised ──────
+# Three-layer approach to maximise the chance of the Dock tooltip showing the
+# app name instead of "python3.11":
+#
+#   1. ctypes setprogname  – sets the OS-level program name that NSProcessInfo
+#      reads on first access.
+#   2. pyobjc NSProcessInfo.setProcessName_  – overrides the ObjC-level name.
+#   3. pyobjc NSBundle.mainBundle infoDictionary mutations  – updates CFBundleName
+#      and CFBundleDisplayName in the in-memory bundle info dict.
+#   4. NSApplication.sharedApplication()  – forces Dock registration NOW, while
+#      our mutations are in effect; Qt reuses the existing NSApplication instance.
+#
+# All of this must happen before any PySide6 symbol is imported, because Qt may
+# initialise NSApplication during the first PySide6 import on some versions.
+if sys.platform == "darwin":
+    try:
+        import ctypes
+        import ctypes.util
+        _libc = ctypes.CDLL(ctypes.util.find_library("c"))
+        _libc.setprogname.argtypes = [ctypes.c_char_p]
+        _libc.setprogname(APP_NAME.encode())
+    except Exception:
+        pass
+
+    try:
+        from Foundation import NSBundle, NSProcessInfo  # pyobjc-framework-Cocoa
+        from AppKit import NSApplication
+
+        NSProcessInfo.processInfo().setProcessName_(APP_NAME)
+
+        _info = NSBundle.mainBundle().infoDictionary()
+        if _info is not None:
+            _info.setObject_forKey_(APP_NAME, "CFBundleName")
+            _info.setObject_forKey_(APP_NAME, "CFBundleDisplayName")
+
+        # Register with the Dock using our name before Qt gets a chance to.
+        NSApplication.sharedApplication()
+    except Exception:
+        pass
+
 from pathlib import Path
 
 from PySide6.QtGui import QIcon
@@ -13,31 +56,10 @@ from tanda_suggester.gui.main_window import MainWindow
 from tanda_suggester.gui.theme import apply_theme
 
 
-def _set_macos_app_name(name: str) -> None:
-    """Override the process name so the macOS Dock tooltip shows 'name' not 'Python X.Y'.
-
-    Must be called before QApplication (i.e. NSApplication) is initialised,
-    because that is when the Dock registers the process name.
-    """
-    try:
-        from Foundation import NSProcessInfo  # pyobjc-framework-Foundation
-        NSProcessInfo.processInfo().setProcessName_(name)
-    except Exception:
-        pass
-    try:
-        from AppKit import NSBundle  # pyobjc-framework-Cocoa
-        NSBundle.mainBundle().infoDictionary()["CFBundleName"] = name
-    except Exception:
-        pass
-
-
 def main() -> None:
-    if sys.platform == "darwin":
-        _set_macos_app_name("TangoSuggest")
-
     app = QApplication(sys.argv)
-    app.setApplicationName("TangoSuggest")
-    app.setOrganizationName("TangoSuggest")
+    app.setApplicationName(APP_NAME)
+    app.setOrganizationName(APP_NAME)
 
     icon_path = Path(__file__).parent / "resources" / "TangoSuggest.icns"
     if icon_path.exists():
@@ -51,3 +73,7 @@ def main() -> None:
     window = MainWindow(DB_PATH)
     window.show()
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
