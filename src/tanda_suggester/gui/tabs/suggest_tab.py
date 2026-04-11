@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from tanda_suggester.gui.workers import (
     LiveTrackWorker,
+    NoiseDiagnosisWorker,
     SuggestByIdWorker,
     SuggestWorker,
 )
@@ -45,6 +46,7 @@ class SuggestTab(QWidget):
         self._live_worker: LiveTrackWorker | None = None
         self._suggest_worker: SuggestWorker | None = None
         self._by_id_worker: SuggestByIdWorker | None = None
+        self._noise_worker: NoiseDiagnosisWorker | None = None
         self._current_seed: dict | None = None   # {title, artist, genre, genre_family, track_id}
 
         self._build_ui()
@@ -320,12 +322,37 @@ class SuggestTab(QWidget):
         menu = QMenu(self)
         reseed_action = menu.addAction("Re-seed from this track")
         show_playlists_action = menu.addAction("Show playlists")
+        menu.addSeparator()
+        diagnose_action = menu.addAction("Diagnose noise…")
         action = menu.exec(self._table.viewport().mapToGlobal(pos))
         track_id = self._table.item(row, 0).data(Qt.UserRole)
         if action == reseed_action:
             self.set_seed_by_id(track_id)
         elif action == show_playlists_action:
             self.show_in_library.emit(track_id)
+        elif action == diagnose_action:
+            title = self._table.item(row, 1).text()
+            artist = self._table.item(row, 2).text()
+            self._diagnose_noise(track_id, title, artist)
+
+    def _diagnose_noise(self, track_id: int, title: str, artist: str) -> None:
+        if self._noise_worker and self._noise_worker.isRunning():
+            self._noise_worker.results.disconnect()
+            self._noise_worker.error.disconnect()
+
+        self._noise_worker = NoiseDiagnosisWorker(track_id=track_id, db_path=self.db_path)
+        self._noise_worker.results.connect(
+            lambda reports: self._on_noise_results(title, artist, reports)
+        )
+        self._noise_worker.error.connect(self._on_error)
+        self._noise_worker.start()
+        self._status_label.setText("Diagnosing noise…")
+
+    def _on_noise_results(self, title: str, artist: str, reports: list) -> None:
+        from tanda_suggester.gui.tabs.noise_dialog import NoiseReportDialog
+        self._status_label.setText("")
+        dlg = NoiseReportDialog(title, artist, reports, parent=self)
+        dlg.exec()
 
     # ------------------------------------------------------------------
     # Cleanup

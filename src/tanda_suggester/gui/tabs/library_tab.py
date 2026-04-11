@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QPushButton,
     QSplitter,
     QAbstractItemView,
     QTableView,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from tanda_suggester.db import get_connection
+from tanda_suggester.gui.workers import SelectiveRebuildWorker
 
 GENRES = ["All", "Tango", "Vals", "Milonga", "Cortina"]
 COLS = ["Title", "Artist", "Genre", "Duration", "Appearances"]
@@ -86,11 +88,14 @@ class TrackTableModel(QAbstractTableModel):
 
 class LibraryTab(QWidget):
     track_selected = Signal(int)   # emits track_id
+    rebuild_finished = Signal()
 
     def __init__(self, db_path: Path) -> None:
         super().__init__()
         self.db_path = db_path
         self._all_rows: list[dict] = []
+        self._current_playlists: list[dict] = []   # id, name for selected track
+        self._rebuild_worker: SelectiveRebuildWorker | None = None
 
         self._build_ui()
         self._connect()
@@ -158,9 +163,18 @@ class LibraryTab(QWidget):
 
         self._playlist_list = QListWidget()
         self._playlist_list.setEditTriggers(QListWidget.NoEditTriggers)
-        self._playlist_list.setSelectionMode(QListWidget.NoSelection)
+        self._playlist_list.setSelectionMode(QListWidget.ExtendedSelection)
         self._playlist_list.setAlternatingRowColors(True)
         right_layout.addWidget(self._playlist_list)
+
+        self._rebuild_btn = QPushButton("Re-import & Rebuild ↻")
+        self._rebuild_btn.setEnabled(False)
+        right_layout.addWidget(self._rebuild_btn)
+
+        self._rebuild_status = QLabel("")
+        self._rebuild_status.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+        self._rebuild_status.setWordWrap(True)
+        right_layout.addWidget(self._rebuild_status)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self._view)
@@ -181,6 +195,8 @@ class LibraryTab(QWidget):
         self._sort_combo.currentIndexChanged.connect(self._apply_sort)
         self._view.doubleClicked.connect(self._on_row_double_clicked)
         self._view.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self._playlist_list.itemSelectionChanged.connect(self._on_playlist_selection_changed)
+        self._rebuild_btn.clicked.connect(self._start_selective_rebuild)
 
     # ------------------------------------------------------------------
     # Data loading
@@ -256,7 +272,7 @@ class LibraryTab(QWidget):
     def _load_playlists_for_track(self, track_id: int) -> None:
         conn = get_connection(self.db_path)
         rows = conn.execute(
-            """SELECT p.name
+            """SELECT p.id, p.name, p.included, p.excluded
                FROM playlist_tracks pt
                JOIN playlists p ON p.id = pt.playlist_id
                WHERE pt.track_id = ?
@@ -265,10 +281,13 @@ class LibraryTab(QWidget):
         ).fetchall()
         conn.close()
 
+        self._current_playlists = [dict(r) for r in rows]
+        self._rebuild_status.setText("")
+        self._rebuild_btn.setEnabled(False)
         self._playlist_list.clear()
         if rows:
             for row in rows:
-                self._playlist_list.addItem(row[0])
+                self._playlist_list.addItem(row["name"])
         else:
             item = QListWidgetItem("Not in any playlist")
             item.setForeground(QColor("#6a6a6a"))
@@ -278,7 +297,50 @@ class LibraryTab(QWidget):
             item.setFlags(item.flags() & ~Qt.ItemIsEnabled)
             self._playlist_list.addItem(item)
 
+    def _on_playlist_selection_changed(self) -> None:
+        selected = self._playlist_list.selectedItems()
+        if self._rebuild_worker is not None and self._rebuild_worker.isRunning():
+            self._rebuild_btn.setEnabled(False)
+            return
+        self._rebuild_btn.setEnabled(bool(selected))
+
+    def _start_selective_rebuild(self) -> None:
+        if self._rebuild_worker is not None and self._rebuild_worker.isRunning():
+            return
+
+        selected_rows = [self._playlist_list.row(i) for i in self._playlist_list.selectedItems()]
+        playlist_ids = [self._current_playlists[r]["id"] for r in selected_rows]
+        if not playlist_ids:
+            return
+
+        self._rebuild_btn.setEnabled(False)
+        self._rebuild_status.setText("Rebuilding…")
+
+        self._rebuild_worker = SelectiveRebuildWorker(self.db_path, playlist_ids)
+        self._rebuild_worker.progress.connect(self._on_rebuild_progress)
+        self._rebuild_worker.finished.connect(self._on_rebuild_done)
+        self._rebuild_worker.error.connect(self._on_rebuild_error)
+        self._rebuild_worker.start()
+
+    def _on_rebuild_progress(self, current: int, total: int, label: str) -> None:
+        self._rebuild_status.setText(f"{label}  ({current}/{total})")
+
+    def _on_rebuild_done(self, tanda_count: int, co_count: int) -> None:
+        self._rebuild_status.setText(
+            f"Done — {tanda_count:,} tandas, {co_count:,} pairs"
+        )
+        self._rebuild_btn.setEnabled(bool(self._playlist_list.selectedItems()))
+        self.refresh()
+        self.rebuild_finished.emit()
+
+    def _on_rebuild_error(self, msg: str) -> None:
+        self._rebuild_status.setText(f"Error: {msg}")
+        self._rebuild_btn.setEnabled(bool(self._playlist_list.selectedItems()))
+
     def _show_playlist_placeholder(self) -> None:
+        self._current_playlists = []
+        self._rebuild_btn.setEnabled(False)
+        self._rebuild_status.setText("")
         self._playlist_list.clear()
         item = QListWidgetItem("Select a track…")
         item.setForeground(QColor("#6a6a6a"))

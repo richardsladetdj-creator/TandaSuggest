@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
         self.import_tab.data_changed.connect(self._on_data_changed)
         self.import_tab.status_message.connect(self._status.showMessage)
         self.playlists_tab.rebuild_finished.connect(self._on_rebuild_finished)
+        self.library_tab.rebuild_finished.connect(self._on_rebuild_finished)
         self.playlists_tab.status_message.connect(self._status.showMessage)
         self.library_tab.track_selected.connect(self.suggest_tab.set_seed_by_id)
         self.suggest_tab.show_in_library.connect(self._on_show_in_library)

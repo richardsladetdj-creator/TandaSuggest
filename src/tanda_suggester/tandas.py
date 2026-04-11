@@ -19,6 +19,20 @@ DEFAULT_CORTINA_GENRES = frozenset(["cortina", "cortinas"])
 
 
 @dataclass
+class OrchestraGroup:
+    artist: str
+    tracks: list[tuple[int, str, str]]  # (playlist_pos, title, artist)
+
+
+@dataclass
+class NoiseReport:
+    playlist_name: str
+    tanda_position: int
+    orchestra_groups: list[OrchestraGroup]
+    missing_cortina_positions: list[int]  # playlist positions after which a cortina is missing
+
+
+@dataclass
 class TrackRow:
     id: int
     title: str
@@ -208,3 +222,75 @@ def _rebuild_co_occurrence(conn: sqlite3.Connection) -> None:
         "INSERT INTO co_occurrence (track_a_id, track_b_id, count) VALUES (?, ?, ?)",
         [(a, b, c) for (a, b), c in counts.items()],
     )
+
+
+def diagnose_noise_track(conn: sqlite3.Connection, track_id: int) -> list[NoiseReport]:
+    """Find all mixed-orchestra tandas containing track_id and identify missing cortinas."""
+    tanda_rows = conn.execute(
+        """SELECT t.id, t.playlist_id, p.name, t.position
+           FROM tandas t
+           JOIN playlists p ON p.id = t.playlist_id
+           WHERE t.id IN (SELECT tanda_id FROM tanda_tracks WHERE track_id = ?)
+           ORDER BY p.name, t.position""",
+        (track_id,),
+    ).fetchall()
+
+    reports: list[NoiseReport] = []
+
+    for row in tanda_rows:
+        tanda_id = row["id"]
+        playlist_id = row["playlist_id"]
+        playlist_name = row["name"]
+        tanda_position = row["position"]
+
+        track_rows = conn.execute(
+            """SELECT tt.position AS tanda_pos, t.title, t.artist, pt.position AS pl_pos
+               FROM tanda_tracks tt
+               JOIN tracks t ON t.id = tt.track_id
+               JOIN playlist_tracks pt ON pt.track_id = t.id AND pt.playlist_id = ?
+               WHERE tt.tanda_id = ?
+               ORDER BY tt.position""",
+            (playlist_id, tanda_id),
+        ).fetchall()
+
+        if not track_rows:
+            continue
+
+        # Group consecutive tracks by artist
+        groups: list[OrchestraGroup] = []
+        current_artist: str | None = None
+        current_tracks: list[tuple[int, str, str]] = []
+
+        for tr in track_rows:
+            artist = tr["artist"]
+            if artist != current_artist:
+                if current_tracks and current_artist is not None:
+                    groups.append(OrchestraGroup(artist=current_artist, tracks=current_tracks))
+                current_artist = artist
+                current_tracks = [(tr["pl_pos"], tr["title"], tr["artist"])]
+            else:
+                current_tracks.append((tr["pl_pos"], tr["title"], tr["artist"]))
+
+        if current_tracks and current_artist is not None:
+            groups.append(OrchestraGroup(artist=current_artist, tracks=current_tracks))
+
+        # Skip homogeneous tandas (single orchestra)
+        if len(groups) <= 1:
+            continue
+
+        # Find positions where a cortina is missing (consecutive playlist positions, different artist)
+        missing: list[int] = []
+        for i in range(len(groups) - 1):
+            last_pl_pos = groups[i].tracks[-1][0]
+            first_pl_pos = groups[i + 1].tracks[0][0]
+            if first_pl_pos == last_pl_pos + 1:
+                missing.append(last_pl_pos)
+
+        reports.append(NoiseReport(
+            playlist_name=playlist_name,
+            tanda_position=tanda_position,
+            orchestra_groups=groups,
+            missing_cortina_positions=missing,
+        ))
+
+    return reports

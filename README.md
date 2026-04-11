@@ -15,6 +15,8 @@ TangoSuggest syncs with your Music.app library, detects the traditional tanda st
 - **Fuzzy search** — Find tracks even with partial or imprecise names
 - **GUI and CLI** — Interactive app for live use; CLI for scripting and batch operations
 - **Selective imports** — Choose which playlists to learn from using include/exclude controls
+- **Selective rebuild** — Re-import and rebuild individual playlists from the Library tab without touching the rest of the database
+- **Noise diagnosis** — Right-click any suggestion to identify mixed-orchestra tandas and missing cortinas that may be causing unexpected results
 
 ---
 
@@ -119,6 +121,7 @@ The main working view during a milonga. Shows the seed track and a ranked list o
 - **Live Mode** — polls Music.app every 5 seconds; updates automatically when the track changes
 - **Same genre only** — restricts suggestions to the same genre family (tango/vals/milonga)
 - Double-click a suggestion to use it as the new seed
+- Right-click a suggestion → **Diagnose noise…** to inspect why a track may be producing unexpected suggestions (see [Noise diagnosis](#noise-diagnosis))
 
 ### Playlists tab
 
@@ -131,6 +134,8 @@ Manage which playlists feed the suggestion index.
 ### Library tab
 
 Browse all imported tracks. Filter by genre or search by title/artist. Double-clicking a track opens it in the Suggest tab. The "Appearances" column shows how many times a track has appeared across your tandas.
+
+Selecting a track shows the playlists it belongs to in a side panel. Select one or more playlists in that panel and click **Re-import & Rebuild ↻** to pull fresh track data from Music.app and re-detect tandas for just those playlists, without touching the rest of the database.
 
 ### Import & Stats tab
 
@@ -153,6 +158,19 @@ tanda-suggester suggest QUERY                  Suggest tracks matching QUERY
 tanda-suggester suggest-current                Suggest based on currently playing track
 tanda-suggester clear-all [--yes]              Delete all data from the database
 ```
+
+---
+
+## Noise diagnosis
+
+If a track appears in suggestions unexpectedly, it may be because it was grouped with a different orchestra's tracks inside a tanda — for example, two orchestras were played back-to-back without a cortina between them, causing the tanda detector to merge them.
+
+Right-click any suggestion in the Suggest tab and choose **Diagnose noise…** to run a scan. The report shows:
+
+- Every mixed-orchestra tanda the track appears in, with the full track listing and playlist positions
+- Markers indicating where a cortina is missing between orchestra groups
+
+Once you've identified the problematic playlists, select them in the Library tab and use **Re-import & Rebuild ↻** to fix the index after you've corrected the playlist in Music.app.
 
 ---
 

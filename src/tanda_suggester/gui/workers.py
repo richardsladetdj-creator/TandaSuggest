@@ -13,6 +13,7 @@ from tanda_suggester.db import DB_PATH, genre_family as _genre_family, get_conne
 from tanda_suggester.music_app import (
     get_current_track,
     get_track_count,
+    read_all_playlists_applescript,
     read_playlist_summaries_applescript,
     read_playlists_applescript,
     read_tracks_applescript,
@@ -199,6 +200,164 @@ class RebuildWorker(QThread):
         # Emit signals only after conn is fully closed and the lock is released.
         # This prevents QThread destruction while conn.close() is still running
         # (which causes SIGABRT on macOS via QThread::~QThread() fatal check).
+        if emit_error is not None:
+            self.error.emit(emit_error)
+        elif emit_result is not None:
+            self.finished.emit(*emit_result)
+
+
+# ---------------------------------------------------------------------------
+# Selective re-import + rebuild worker: refresh specific playlists from Music.app
+# ---------------------------------------------------------------------------
+
+class SelectiveRebuildWorker(QThread):
+    """Re-import specific playlists from Music.app then rebuild their tanda/co-occurrence index."""
+
+    progress = Signal(int, int, str)
+    finished = Signal(int, int)   # tanda_count, co_occurrence_count
+    error = Signal(str)
+
+    def __init__(self, db_path: Path, playlist_ids: list[int]) -> None:
+        super().__init__()
+        self.db_path = db_path
+        self.playlist_ids = playlist_ids
+
+    def run(self) -> None:
+        if not _rebuild_lock.acquire(blocking=False):
+            self.error.emit("A rebuild is already in progress.")
+            return
+
+        conn = None
+        emit_result: tuple[int, int] | None = None
+        emit_error: str | None = None
+
+        try:
+            conn = get_connection(self.db_path)
+            conn.execute("SAVEPOINT selective_rebuild")
+
+            placeholders = ",".join("?" * len(self.playlist_ids))
+
+            # Look up name + music_app_id for each selected playlist
+            playlist_rows = conn.execute(
+                f"SELECT id, name, music_app_id FROM playlists WHERE id IN ({placeholders})",
+                self.playlist_ids,
+            ).fetchall()
+
+            # Phase 1: Re-import each playlist from Music.app
+            for i, pl_row in enumerate(playlist_rows, 1):
+                self.progress.emit(i, len(playlist_rows), f"Importing '{pl_row['name']}'")
+                tracks_by_pid, raw_playlists, _ = read_playlists_applescript(pl_row["name"])
+
+                _upsert_tracks(conn, list(tracks_by_pid.values()))
+
+                pid_to_id: dict[str, int] = {
+                    r["music_app_id"]: r["id"]
+                    for r in conn.execute("SELECT id, music_app_id FROM tracks").fetchall()
+                }
+
+                for raw_pl in raw_playlists:
+                    if raw_pl.persistent_id != pl_row["music_app_id"]:
+                        continue  # name matched a different playlist — skip
+                    track_ids = [pid_to_id[p] for p in raw_pl.track_persistent_ids if p in pid_to_id]
+                    conn.execute(
+                        "UPDATE playlists SET track_count = ? WHERE id = ?",
+                        (len(track_ids), pl_row["id"]),
+                    )
+                    conn.execute("DELETE FROM playlist_tracks WHERE playlist_id = ?", (pl_row["id"],))
+                    conn.executemany(
+                        "INSERT INTO playlist_tracks (playlist_id, position, track_id) VALUES (?, ?, ?)",
+                        [(pl_row["id"], pos, tid) for pos, tid in enumerate(track_ids)],
+                    )
+
+            # Phase 2: Delete existing tanda data for selected playlists
+            tanda_ids = conn.execute(
+                f"SELECT id FROM tandas WHERE playlist_id IN ({placeholders})",
+                self.playlist_ids,
+            ).fetchall()
+            if tanda_ids:
+                tanda_id_list = [r["id"] for r in tanda_ids]
+                td_placeholders = ",".join("?" * len(tanda_id_list))
+                conn.execute(
+                    f"DELETE FROM tanda_tracks WHERE tanda_id IN ({td_placeholders})",
+                    tanda_id_list,
+                )
+            conn.execute(
+                f"DELETE FROM tandas WHERE playlist_id IN ({placeholders})",
+                self.playlist_ids,
+            )
+
+            # Phase 3: Re-detect tandas for included playlists
+            included = conn.execute(
+                f"SELECT id FROM playlists WHERE id IN ({placeholders}) AND included = 1 AND excluded = 0",
+                self.playlist_ids,
+            ).fetchall()
+
+            new_tandas = []
+            for i, row in enumerate(included, 1):
+                playlist_id = row["id"]
+                self.progress.emit(i, len(included), "Detecting tandas")
+
+                rows = conn.execute(
+                    """SELECT t.id, t.title, t.artist, t.genre, t.genre_family
+                       FROM playlist_tracks pt
+                       JOIN tracks t ON t.id = pt.track_id
+                       WHERE pt.playlist_id = ?
+                       ORDER BY pt.position""",
+                    (playlist_id,),
+                ).fetchall()
+
+                tracks = [
+                    TrackRow(
+                        id=r["id"],
+                        title=r["title"],
+                        artist=r["artist"],
+                        genre=r["genre"],
+                        genre_family=r["genre_family"],
+                    )
+                    for r in rows
+                ]
+                new_tandas.extend(detect_tandas_for_playlist(playlist_id, tracks))
+
+            for tanda in new_tandas:
+                cur = conn.execute(
+                    """INSERT INTO tandas (playlist_id, position, genre, genre_family, track_count)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        tanda.playlist_id,
+                        tanda.position,
+                        tanda.genre,
+                        tanda.genre_family_value,
+                        len(tanda.tracks),
+                    ),
+                )
+                tanda_id = cur.lastrowid
+                for pos, track in enumerate(tanda.tracks):
+                    conn.execute(
+                        "INSERT INTO tanda_tracks (tanda_id, position, track_id) VALUES (?, ?, ?)",
+                        (tanda_id, pos, track.id),
+                    )
+
+            # Phase 4: Rebuild co_occurrence from ALL tanda_tracks (global table)
+            conn.execute("DELETE FROM co_occurrence")
+            _rebuild_co_occurrence(conn)
+            co_count = conn.execute("SELECT COUNT(*) FROM co_occurrence").fetchone()[0]
+            conn.execute("RELEASE selective_rebuild")
+            emit_result = (len(new_tandas), co_count)
+
+        except Exception as exc:
+            if conn is not None:
+                try:
+                    conn.execute("ROLLBACK TO selective_rebuild")
+                    conn.execute("RELEASE selective_rebuild")
+                except Exception:
+                    pass
+            emit_error = str(exc)
+
+        finally:
+            if conn is not None:
+                conn.close()
+            _rebuild_lock.release()
+
         if emit_error is not None:
             self.error.emit(emit_error)
         elif emit_result is not None:
@@ -446,6 +605,32 @@ class SuggestByIdWorker(QThread):
             conn.close()
             self.results.emit(seed, suggestions)
 
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Noise diagnosis worker: find mixed-orchestra tandas for a track
+# ---------------------------------------------------------------------------
+
+class NoiseDiagnosisWorker(QThread):
+    """Diagnose a noise track: find mixed-orchestra tandas and missing cortinas."""
+
+    results = Signal(list)   # list[NoiseReport]
+    error = Signal(str)
+
+    def __init__(self, track_id: int, db_path: Path | None = None) -> None:
+        super().__init__()
+        self.track_id = track_id
+        self.db_path = db_path or DB_PATH
+
+    def run(self) -> None:
+        try:
+            from tanda_suggester.tandas import diagnose_noise_track
+            conn = get_connection(self.db_path)
+            reports = diagnose_noise_track(conn, self.track_id)
+            conn.close()
+            self.results.emit(reports)
         except Exception as exc:
             self.error.emit(str(exc))
 
