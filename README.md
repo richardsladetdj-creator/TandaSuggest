@@ -25,7 +25,6 @@ TangoSuggest syncs with your Music.app library, detects the traditional tanda st
 - macOS (uses Apple Music.app via AppleScript)
 - Python 3.11+
 - Music.app with tango playlists (tracks should have genre tags: `tango`, `vals`, `milonga`, or `cortina`)
-- iTunes XML export enabled in Music.app preferences (Music → Settings → Files → "Share iTunes Library XML with other applications")
 
 ---
 
