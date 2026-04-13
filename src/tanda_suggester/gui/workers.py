@@ -610,6 +610,64 @@ class SuggestByIdWorker(QThread):
 
 
 # ---------------------------------------------------------------------------
+# Suggest-by-music-app-id worker: direct lookup via persistent_id
+# ---------------------------------------------------------------------------
+
+class SuggestByMusicAppIdWorker(QThread):
+    """Look up a track by Music.app persistent_id; emit not_in_library if absent."""
+
+    results = Signal(object, list)          # seed dict, list[Suggestion]
+    not_in_library = Signal(str, str, str)  # title, artist, genre
+    error = Signal(str)
+
+    def __init__(
+        self,
+        pid: str,
+        title: str,
+        artist: str,
+        genre: str,
+        same_genre: bool,
+        limit: int,
+        db_path: Path | None = None,
+    ) -> None:
+        super().__init__()
+        self.pid = pid
+        self.title = title
+        self.artist = artist
+        self.genre = genre
+        self.same_genre = same_genre
+        self.limit = limit
+        self.db_path = db_path or DB_PATH
+
+    def run(self) -> None:
+        try:
+            conn = get_connection(self.db_path)
+            row = conn.execute(
+                "SELECT id, title, artist, genre, genre_family FROM tracks WHERE music_app_id = ?",
+                (self.pid,),
+            ).fetchone()
+            if not row:
+                conn.close()
+                self.not_in_library.emit(self.title, self.artist, self.genre)
+                return
+            seed = {
+                "track_id": row["id"],
+                "title": row["title"],
+                "artist": row["artist"],
+                "genre": row["genre"],
+                "genre_family": row["genre_family"],
+            }
+            suggestions = suggest_for_track(
+                conn, row["id"], row["genre_family"],
+                same_genre=self.same_genre, limit=self.limit,
+            )
+            conn.close()
+            self.results.emit(seed, suggestions)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+# ---------------------------------------------------------------------------
 # Noise diagnosis worker: find mixed-orchestra tandas for a track
 # ---------------------------------------------------------------------------
 

@@ -23,6 +23,7 @@ from tanda_suggester.gui.workers import (
     LiveTrackWorker,
     NoiseDiagnosisWorker,
     SuggestByIdWorker,
+    SuggestByMusicAppIdWorker,
     SuggestWorker,
 )
 
@@ -46,6 +47,7 @@ class SuggestTab(QWidget):
         self._live_worker: LiveTrackWorker | None = None
         self._suggest_worker: SuggestWorker | None = None
         self._by_id_worker: SuggestByIdWorker | None = None
+        self._pid_worker: SuggestByMusicAppIdWorker | None = None
         self._noise_worker: NoiseDiagnosisWorker | None = None
         self._current_seed: dict | None = None   # {title, artist, genre, genre_family, track_id}
 
@@ -193,6 +195,40 @@ class SuggestTab(QWidget):
         self._by_id_worker.error.connect(self._on_error)
         self._by_id_worker.start()
 
+    def _start_suggest_by_pid(
+        self, pid: str, title: str, artist: str, genre: str
+    ) -> None:
+        if self._suggest_worker and self._suggest_worker.isRunning():
+            self._suggest_worker.results.disconnect()
+            self._suggest_worker.no_match.disconnect()
+            self._suggest_worker.error.disconnect()
+
+        if self._pid_worker and self._pid_worker.isRunning():
+            self._pid_worker.results.disconnect()
+            self._pid_worker.not_in_library.disconnect()
+            self._pid_worker.error.disconnect()
+
+        self._pid_worker = SuggestByMusicAppIdWorker(
+            pid=pid,
+            title=title,
+            artist=artist,
+            genre=genre,
+            same_genre=self._same_genre_chk.isChecked(),
+            limit=self._limit_spin.value(),
+            db_path=self.db_path,
+        )
+        self._pid_worker.results.connect(self._on_suggest_results)
+        self._pid_worker.not_in_library.connect(self._on_not_in_library)
+        self._pid_worker.error.connect(self._on_error)
+        self._pid_worker.start()
+        self._status_label.setText("Searching…")
+
+    def _on_not_in_library(self, title: str, artist: str, genre: str) -> None:
+        self._current_seed = None
+        self._seed_label.setText(f"Seed: {title}  —  {artist}  [{genre}]")
+        self._table.setRowCount(0)
+        self._status_label.setText("Track not in any playlist — no suggestions")
+
     # ------------------------------------------------------------------
     # Current track
     # ------------------------------------------------------------------
@@ -212,7 +248,9 @@ class SuggestTab(QWidget):
         self._search.blockSignals(True)
         self._search.setText(f"{track.title} - {track.artist}")
         self._search.blockSignals(False)
-        self._start_suggest(f"{track.title} - {track.artist}")
+        self._start_suggest_by_pid(
+            track.persistent_id, track.title, track.artist, track.genre
+        )
 
     # ------------------------------------------------------------------
     # Live mode
@@ -233,11 +271,10 @@ class SuggestTab(QWidget):
             self._status_label.setText("")
 
     def _on_live_track_changed(self, pid: str, title: str, artist: str, genre: str) -> None:
-        query = f"{title} - {artist}"
         self._search.blockSignals(True)
-        self._search.setText(query)
+        self._search.setText(f"{title} - {artist}")
         self._search.blockSignals(False)
-        self._start_suggest(query)
+        self._start_suggest_by_pid(pid, title, artist, genre)
 
     # ------------------------------------------------------------------
     # Suggestion results
