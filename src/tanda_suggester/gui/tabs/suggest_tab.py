@@ -29,13 +29,22 @@ from tanda_suggester.gui.workers import (
 
 
 SUGGESTION_COLS = ["Score", "Title", "Artist", "Genre"]
-_GENRE_COLOUR = {
+_BUILTIN_GENRE_COLOUR = {
     "tango": "#e05252",
     "vals": "#5dade2",
     "milonga": "#52d98a",
     "cortina": "#95a5a6",
 }
 _SEED_ROW_COLOUR = "#1e4d2a"   # dark green background for seed track row
+
+
+def _genre_colour(family: str) -> str:
+    """Return a display colour for a genre family key."""
+    if family in _BUILTIN_GENRE_COLOUR:
+        return _BUILTIN_GENRE_COLOUR[family]
+    # Generate a stable colour from the genre name hash
+    h = hash(family) & 0xFFFFFF
+    return f"#{h:06x}"
 
 
 class SuggestTab(QWidget):
@@ -316,9 +325,9 @@ class SuggestTab(QWidget):
         for col, item in enumerate(seed_items):
             item.setBackground(seed_bg)
             self._table.setItem(0, col, item)
-        seed_genre_colour = _GENRE_COLOUR.get(seed.get("genre_family") or "", "")
-        if seed_genre_colour:
-            self._table.item(0, 3).setForeground(QColor(seed_genre_colour))
+        seed_gf = seed.get("genre_family") or ""
+        if seed_gf:
+            self._table.item(0, 3).setForeground(QColor(_genre_colour(seed_gf)))
 
         for s in suggestions:
             row = self._table.rowCount()
@@ -330,9 +339,8 @@ class SuggestTab(QWidget):
             self._table.setItem(row, 1, QTableWidgetItem(s.title))
             self._table.setItem(row, 2, QTableWidgetItem(s.artist))
             genre_item = QTableWidgetItem(s.genre)
-            colour = _GENRE_COLOUR.get(s.genre_family or "", "")
-            if colour:
-                genre_item.setForeground(QColor(colour))
+            if s.genre_family:
+                genre_item.setForeground(QColor(_genre_colour(s.genre_family)))
             self._table.setItem(row, 3, genre_item)
 
         count = len(suggestions)

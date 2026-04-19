@@ -15,6 +15,19 @@ XML_PATH = Path.home() / "Music" / "Music" / "iTunes" / "iTunes Music Library.xm
 RELEVANT_GENRES = frozenset(["tango", "vals", "milonga", "cortina"])
 
 
+def _is_relevant(genre: str, settings=None) -> bool:
+    """Return True if a track with this genre should be imported.
+
+    When settings is None, falls back to the legacy substring check against
+    RELEVANT_GENRES so that existing callers without settings still work.
+    """
+    if settings is not None:
+        from tanda_suggester.settings import is_relevant as _settings_is_relevant
+        return _settings_is_relevant(genre, settings)
+    g = genre.lower()
+    return any(rg in g for rg in RELEVANT_GENRES)
+
+
 @dataclass
 class RawTrack:
     persistent_id: str
@@ -31,16 +44,24 @@ class RawPlaylist:
     track_persistent_ids: list[str]  # ordered
 
 
-def _is_relevant(genre: str) -> bool:
-    g = genre.lower()
-    return any(rg in g for rg in RELEVANT_GENRES)
-
-
 # ---------------------------------------------------------------------------
 # AppleScript: live track reader
 # ---------------------------------------------------------------------------
 
-_BATCH_SCRIPT = """\
+
+def _make_batch_script(settings=None) -> str:
+    """Build the AppleScript batch-scan script, with genre filter based on settings."""
+    if settings is not None and settings.cortina.catch_all:
+        # Import everything — no genre filter
+        genre_check = ""
+        inner = """\
+            set rec to (persistent ID of t) & sep & (name of t) & sep & (artist of t) & sep & g & sep & ((duration of t as integer) as text)
+                if output is "" then
+                    set output to rec
+                else
+                    set output to output & recSep & rec
+                end if"""
+        return """\
 tell application "Music"
     set allTracks to tracks of library playlist 1
     set sep to "|~|"
@@ -50,7 +71,49 @@ tell application "Music"
         try
             set t to item i of allTracks
             set g to genre of t
-            if (g contains "ango" or g contains "als" or g contains "ilonga" or g contains "ortina") then
+            set rec to (persistent ID of t) & sep & (name of t) & sep & (artist of t) & sep & g & sep & ((duration of t as integer) as text)
+            if output is "" then
+                set output to rec
+            else
+                set output to output & recSep & rec
+            end if
+        end try
+    end repeat
+    return output
+end tell
+"""
+
+    # Build dynamic filter from settings or fall back to legacy hardcoded substrings
+    if settings is not None:
+        conditions = []
+        for rule in settings.dance_genres:
+            if rule.partial_match:
+                # Use a safe 3+ char substring to avoid overly broad matches
+                substr = rule.name[:4].lower()
+                conditions.append(f'g contains "{substr}"')
+            else:
+                conditions.append(f'g is "{rule.name.lower()}"')
+        for cortina_name in settings.cortina.names:
+            if settings.cortina.partial_match:
+                substr = cortina_name[:4].lower()
+                conditions.append(f'g contains "{substr}"')
+            else:
+                conditions.append(f'g is "{cortina_name.lower()}"')
+        filter_expr = " or ".join(conditions) if conditions else "false"
+    else:
+        filter_expr = 'g contains "ango" or g contains "als" or g contains "ilonga" or g contains "ortina"'
+
+    return f"""\
+tell application "Music"
+    set allTracks to tracks of library playlist 1
+    set sep to "|~|"
+    set recSep to ASCII character 30
+    set output to ""
+    repeat with i from {{start}} to {{end}}
+        try
+            set t to item i of allTracks
+            set g to genre of t
+            if ({filter_expr}) then
                 set rec to (persistent ID of t) & sep & (name of t) & sep & (artist of t) & sep & g & sep & ((duration of t as integer) as text)
                 if output is "" then
                     set output to rec
@@ -86,24 +149,26 @@ def get_track_count() -> int:
 
 def read_tracks_applescript(
     batch_size: int = 500,
+    settings=None,
 ) -> Generator[list[RawTrack], None, None]:
     """Yield batches of RawTrack from Music.app via AppleScript.
 
-    Only yields tracks whose genre contains tango/vals/milonga/cortina.
+    Only yields tracks whose genre matches the configured rules.
     Yields one list[RawTrack] per batch.
     """
+    batch_script_template = _make_batch_script(settings)
     total = get_track_count()
     start = 1
     while start <= total:
         end = min(start + batch_size - 1, total)
-        script = _BATCH_SCRIPT.format(start=start, end=end)
+        script = batch_script_template.format(start=start, end=end)
         raw = _run_applescript(script)
-        batch = _parse_applescript_track_list(raw)
+        batch = _parse_applescript_track_list(raw, settings=settings)
         yield batch
         start = end + 1
 
 
-def _parse_applescript_track_list(raw: str) -> list[RawTrack]:
+def _parse_applescript_track_list(raw: str, settings=None) -> list[RawTrack]:
     """Parse structured AppleScript output into RawTrack objects.
 
     Format: records separated by ASCII 30, fields within each record
@@ -125,7 +190,7 @@ def _parse_applescript_track_list(raw: str) -> list[RawTrack]:
             duration = int(dur_str)
         except ValueError:
             continue
-        if _is_relevant(genre):
+        if _is_relevant(genre, settings):
             tracks.append(
                 RawTrack(
                     persistent_id=pid,
@@ -397,6 +462,7 @@ def read_all_playlists_applescript() -> tuple[list[RawPlaylist], str]:
 
 def read_playlists_applescript(
     name_filter: str | None = None,
+    settings=None,
 ) -> tuple[dict[str, RawTrack], list[RawPlaylist], str]:
     """Return playlists (optionally filtered by name) with full track details from Music.app.
 
@@ -489,7 +555,7 @@ end tell
                 continue
             pid, title, artist, genre, dur_str = parts
             track_pids.append(pid)
-            if _is_relevant(genre) and pid not in tracks_by_pid:
+            if _is_relevant(genre, settings) and pid not in tracks_by_pid:
                 try:
                     dur = int(dur_str)
                 except ValueError:

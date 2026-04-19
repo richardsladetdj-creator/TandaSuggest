@@ -23,16 +23,9 @@ from PySide6.QtWidgets import (
 
 from tanda_suggester.db import get_connection
 from tanda_suggester.gui.workers import SelectiveRebuildWorker
+from tanda_suggester.settings import load_settings
 
-GENRES = ["All", "Tango", "Vals", "Milonga", "Cortina"]
 COLS = ["Title", "Artist", "Genre", "Duration", "Appearances"]
-_GENRE_FAMILY_MAP = {
-    "All": None,
-    "Tango": "tango",
-    "Vals": "vals",
-    "Milonga": "milonga",
-    "Cortina": "cortina",
-}
 
 
 def _fmt_duration(seconds: int | None) -> str:
@@ -119,8 +112,8 @@ class LibraryTab(QWidget):
 
         controls.addWidget(QLabel("Genre:"))
         self._genre_combo = QComboBox()
-        self._genre_combo.addItems(GENRES)
-        self._genre_combo.setFixedWidth(100)
+        self._genre_combo.addItem("All")
+        self._genre_combo.setFixedWidth(120)
         controls.addWidget(self._genre_combo)
 
         controls.addWidget(QLabel("Sort:"))
@@ -212,9 +205,29 @@ class LibraryTab(QWidget):
                GROUP BY t.id
                ORDER BY appearances DESC"""
         ).fetchall()
+        settings = load_settings(conn)
         conn.close()
+
         self._all_rows = [dict(r) for r in rows]
+        self._refresh_genre_combo(settings)
         self._apply_filter()
+
+    def _refresh_genre_combo(self, settings) -> None:
+        """Rebuild the genre filter dropdown from current settings."""
+        current = self._genre_combo.currentData()  # preserve selection if possible
+        self._genre_combo.blockSignals(True)
+        self._genre_combo.clear()
+        self._genre_combo.addItem("All", userData=None)
+        for rule in settings.dance_genres:
+            self._genre_combo.addItem(rule.name, userData=rule.family())
+        self._genre_combo.addItem("Cortina", userData="cortina")
+        # Restore previous selection by family key
+        if current is not None:
+            for i in range(self._genre_combo.count()):
+                if self._genre_combo.itemData(i) == current:
+                    self._genre_combo.setCurrentIndex(i)
+                    break
+        self._genre_combo.blockSignals(False)
 
     # ------------------------------------------------------------------
     # Filtering & sorting
@@ -222,8 +235,7 @@ class LibraryTab(QWidget):
 
     def _apply_filter(self) -> None:
         text = self._search.text().strip()
-        genre_label = self._genre_combo.currentText()
-        genre_family = _GENRE_FAMILY_MAP.get(genre_label)
+        genre_family = self._genre_combo.currentData()  # None for "All", family key otherwise
 
         if genre_family:
             filtered = [r for r in self._all_rows if r.get("genre_family") == genre_family]

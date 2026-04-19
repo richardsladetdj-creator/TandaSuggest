@@ -11,6 +11,7 @@ from PySide6.QtGui import QCloseEvent
 from tanda_suggester.gui.tabs.import_tab import ImportTab
 from tanda_suggester.gui.tabs.library_tab import LibraryTab
 from tanda_suggester.gui.tabs.playlists_tab import PlaylistsTab
+from tanda_suggester.gui.tabs.settings_tab import SettingsTab
 from tanda_suggester.gui.tabs.suggest_tab import SuggestTab
 
 
@@ -28,11 +29,13 @@ class MainWindow(QMainWindow):
         self.playlists_tab = PlaylistsTab(db_path)
         self.library_tab = LibraryTab(db_path)
         self.import_tab = ImportTab(db_path)
+        self.settings_tab = SettingsTab(db_path)
 
         self._tabs.addTab(self.suggest_tab, "Suggest")
         self._tabs.addTab(self.playlists_tab, "Playlists")
         self._tabs.addTab(self.library_tab, "Library")
         self._tabs.addTab(self.import_tab, "Import & Stats")
+        self._tabs.addTab(self.settings_tab, "Settings")
 
         self.setCentralWidget(self._tabs)
         self._status = QStatusBar()
@@ -47,12 +50,21 @@ class MainWindow(QMainWindow):
         self.playlists_tab.status_message.connect(self._status.showMessage)
         self.library_tab.track_selected.connect(self.suggest_tab.set_seed_by_id)
         self.suggest_tab.show_in_library.connect(self._on_show_in_library)
+        self.settings_tab.settings_changed.connect(self._on_settings_changed)
         self._tabs.currentChanged.connect(self._on_tab_changed)
 
     def _on_data_changed(self) -> None:
         self.library_tab.refresh()
         self.playlists_tab.refresh_db_panel()
         self.suggest_tab.invalidate_cache()
+
+    def _on_settings_changed(self) -> None:
+        """Called when genre settings are saved. Refresh views and trigger tanda rebuild."""
+        self.library_tab.refresh()
+        self.suggest_tab.invalidate_cache()
+        self._status.showMessage("Settings saved — rebuilding tandas…")
+        # Trigger a full tanda rebuild via the import tab's rebuild mechanism
+        self.import_tab.start_rebuild()
 
     def _on_rebuild_finished(self) -> None:
         self.suggest_tab.invalidate_cache()

@@ -201,6 +201,10 @@ class ImportTab(QWidget):
     # Rebuild
     # ------------------------------------------------------------------
 
+    def start_rebuild(self) -> None:
+        """Public entry point to trigger a tanda rebuild (e.g. from the Settings tab)."""
+        self._start_rebuild()
+
     def _start_rebuild(self) -> None:
         if self._rebuild_worker is not None and self._rebuild_worker.isRunning():
             return

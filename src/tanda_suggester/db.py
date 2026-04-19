@@ -8,6 +8,11 @@ from pathlib import Path
 DB_PATH = Path.home() / ".local" / "share" / "tanda-suggester" / "db.sqlite"
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS app_settings (
+    key     TEXT PRIMARY KEY,
+    value   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS tracks (
     id              INTEGER PRIMARY KEY,
     music_app_id    TEXT    UNIQUE NOT NULL,
@@ -87,16 +92,37 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE playlists ADD COLUMN excluded BOOLEAN NOT NULL DEFAULT 0")
         conn.commit()
 
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "app_settings" not in tables:
+        conn.execute(
+            "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        conn.commit()
 
-def genre_family(genre: str) -> str | None:
-    """Map a raw genre string to a genre family for filtering."""
-    g = genre.lower()
-    if "tango" in g:
-        return "tango"
-    if "vals" in g:
-        return "vals"
-    if "milonga" in g:
-        return "milonga"
-    if "cortina" in g:
-        return "cortina"
-    return None
+
+def genre_family(genre: str, conn: sqlite3.Connection | None = None) -> str | None:
+    """Map a raw genre string to a genre family for filtering.
+
+    When conn is provided, uses the user's configured genre rules from the DB.
+    Falls back to default settings (Tango/Vals/Milonga/Cortina substring match).
+    """
+    from tanda_suggester.settings import classify_genre, load_settings, DEFAULT_SETTINGS
+    if conn is not None:
+        settings = load_settings(conn)
+    else:
+        settings = DEFAULT_SETTINGS
+    return classify_genre(genre, settings)
+
+
+def reprocess_genre_families(conn: sqlite3.Connection) -> int:
+    """Re-classify genre_family for all tracks using current settings.
+
+    Returns the number of tracks updated.
+    """
+    from tanda_suggester.settings import classify_genre, load_settings
+    settings = load_settings(conn)
+    rows = conn.execute("SELECT id, genre FROM tracks").fetchall()
+    updates = [(classify_genre(row["genre"], settings), row["id"]) for row in rows]
+    conn.executemany("UPDATE tracks SET genre_family = ? WHERE id = ?", updates)
+    conn.commit()
+    return len(updates)

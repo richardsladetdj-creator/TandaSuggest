@@ -17,6 +17,7 @@ TangoSuggest syncs with your Music.app library, detects the traditional tanda st
 - **Selective imports** — Choose which playlists to learn from using include/exclude controls
 - **Selective rebuild** — Re-import and rebuild individual playlists from the Library tab without touching the rest of the database
 - **Noise diagnosis** — Right-click any suggestion to identify mixed-orchestra tandas and missing cortinas that may be causing unexpected results
+- **Configurable genre settings** — Define which genres count as tango/vals/milonga and how cortinas are detected, via the Settings tab
 
 ---
 
@@ -140,6 +141,15 @@ Selecting a track shows the playlists it belongs to in a side panel. Select one 
 
 Shows database statistics (track count, playlist count, tanda count, co-occurrence pairs) and provides import and rebuild controls with progress bars.
 
+### Settings tab
+
+Configure how genres and cortinas are classified. Changes take effect immediately and trigger a tanda rebuild.
+
+- **Dance genres** — Define which genre strings count as tango, vals, milonga, etc. Each rule can be a substring match (default) or an exact match.
+- **Cortina detection** — Set which genre names identify cortina tracks. Enable **catch-all** mode to treat any non-dance track as a cortina.
+
+Settings are stored in the database and applied during both import and tanda detection, so after saving the index is automatically rebuilt to reflect the new rules.
+
 ---
 
 ## CLI reference
@@ -177,7 +187,7 @@ Once you've identified the problematic playlists, select them in the Library tab
 
 ### Track import
 
-Tracks are read from Music.app via AppleScript in batches, then cross-referenced against your iTunes XML library export for playlist structure and track ordering. Only tracks with genres containing `tango`, `vals`, `milonga`, or `cortina` are stored.
+Tracks are read from Music.app via AppleScript in batches. Only tracks whose genre matches the configured dance genres or cortina names are stored. The genre filter is built dynamically from your Settings — by default it matches `tango`, `vals`, `milonga`, and `cortina` as substrings. Enable catch-all cortina mode to import every track regardless of genre.
 
 ### Tanda detection
 

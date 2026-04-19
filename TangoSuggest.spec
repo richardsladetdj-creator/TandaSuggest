@@ -16,6 +16,7 @@ a = Analysis(
     ],
     hiddenimports=[
         "tanda_suggester.db",
+        "tanda_suggester.settings",
         "tanda_suggester.suggest",
         "tanda_suggester.search",
         "tanda_suggester.tandas",

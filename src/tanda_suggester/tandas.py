@@ -11,10 +11,12 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from rich.status import Status
 
-from tanda_suggester.db import genre_family, get_connection
+from tanda_suggester.db import get_connection
+from tanda_suggester.settings import GenreSettings, load_settings
 
 console = Console()
 
+# Kept for backward compatibility with any external callers
 DEFAULT_CORTINA_GENRES = frozenset(["cortina", "cortinas"])
 
 
@@ -62,14 +64,19 @@ class Tanda:
         return Counter(families).most_common(1)[0][0]
 
 
-def is_cortina(genre: str, cortina_genres: frozenset[str] = DEFAULT_CORTINA_GENRES) -> bool:
-    return genre.lower() in cortina_genres
+def is_cortina(genre: str, settings: GenreSettings | None = None) -> bool:
+    """Return True if this genre is classified as a cortina."""
+    if settings is not None:
+        from tanda_suggester.settings import classify_genre
+        return classify_genre(genre, settings) == "cortina"
+    # Legacy fallback
+    return genre.lower() in DEFAULT_CORTINA_GENRES
 
 
 def detect_tandas_for_playlist(
     playlist_id: int,
     tracks: list[TrackRow],
-    cortina_genres: frozenset[str] = DEFAULT_CORTINA_GENRES,
+    settings: GenreSettings | None = None,
     min_tracks: int = 2,
 ) -> list[Tanda]:
     """Detect tandas within an ordered list of tracks for one playlist."""
@@ -89,7 +96,7 @@ def detect_tandas_for_playlist(
     for track in tracks:
         if not track.genre:
             continue  # skip genre-less tracks per spec
-        if is_cortina(track.genre, cortina_genres):
+        if is_cortina(track.genre, settings):
             emit()
             buffer = []
         else:
@@ -103,12 +110,14 @@ def detect_tandas_for_playlist(
 
 def rebuild_tandas(
     conn: sqlite3.Connection,
-    cortina_genres: frozenset[str] = DEFAULT_CORTINA_GENRES,
+    settings: GenreSettings | None = None,
 ) -> tuple[int, int]:
     """Detect tandas for all included playlists, rebuild co-occurrence.
 
     Returns (tanda_count, co_occurrence_pair_count).
     """
+    if settings is None:
+        settings = load_settings(conn)
     # Clear existing tanda data
     conn.execute("DELETE FROM tanda_tracks")
     conn.execute("DELETE FROM tandas")
@@ -151,7 +160,7 @@ def rebuild_tandas(
                 for r in rows
             ]
 
-            tandas = detect_tandas_for_playlist(playlist_id, tracks, cortina_genres)
+            tandas = detect_tandas_for_playlist(playlist_id, tracks, settings)
             all_tandas.extend(tandas)
             progress.advance(detect_task)
 

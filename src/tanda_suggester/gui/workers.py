@@ -9,7 +9,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from tanda_suggester.db import DB_PATH, genre_family as _genre_family, get_connection
+from tanda_suggester.db import DB_PATH, get_connection
+from tanda_suggester.settings import classify_genre, load_settings
 from tanda_suggester.music_app import (
     get_current_track,
     get_track_count,
@@ -45,14 +46,15 @@ class ImportWorker(QThread):
     def run(self) -> None:
         try:
             conn = get_connection(self.db_path)
+            settings = load_settings(conn)
 
             # --- Phase 1: tracks ---
             total_tracks = get_track_count()
             total_batches = max(1, ceil(total_tracks / self.batch_size))
             tracks_upserted = 0
 
-            for batch_num, batch in enumerate(read_tracks_applescript(self.batch_size), 1):
-                _upsert_tracks(conn, batch)
+            for batch_num, batch in enumerate(read_tracks_applescript(self.batch_size, settings=settings), 1):
+                _upsert_tracks(conn, batch, settings=settings)
                 tracks_upserted += len(batch)
                 self.progress.emit(batch_num, total_batches, "Importing tracks")
 
@@ -123,6 +125,7 @@ class RebuildWorker(QThread):
 
         try:
             conn = get_connection(self.db_path)
+            settings = load_settings(conn)
             conn.execute("SAVEPOINT rebuild")
 
             conn.execute("DELETE FROM tanda_tracks")
@@ -157,7 +160,7 @@ class RebuildWorker(QThread):
                     )
                     for r in rows
                 ]
-                all_tandas.extend(detect_tandas_for_playlist(playlist_id, tracks))
+                all_tandas.extend(detect_tandas_for_playlist(playlist_id, tracks, settings))
 
             for tanda in all_tandas:
                 cur = conn.execute(
@@ -233,6 +236,7 @@ class SelectiveRebuildWorker(QThread):
 
         try:
             conn = get_connection(self.db_path)
+            settings = load_settings(conn)
             conn.execute("SAVEPOINT selective_rebuild")
 
             placeholders = ",".join("?" * len(self.playlist_ids))
@@ -246,9 +250,9 @@ class SelectiveRebuildWorker(QThread):
             # Phase 1: Re-import each playlist from Music.app
             for i, pl_row in enumerate(playlist_rows, 1):
                 self.progress.emit(i, len(playlist_rows), f"Importing '{pl_row['name']}'")
-                tracks_by_pid, raw_playlists, _ = read_playlists_applescript(pl_row["name"])
+                tracks_by_pid, raw_playlists, _ = read_playlists_applescript(pl_row["name"], settings=settings)
 
-                _upsert_tracks(conn, list(tracks_by_pid.values()))
+                _upsert_tracks(conn, list(tracks_by_pid.values()), settings=settings)
 
                 pid_to_id: dict[str, int] = {
                     r["music_app_id"]: r["id"]
@@ -316,7 +320,7 @@ class SelectiveRebuildWorker(QThread):
                     )
                     for r in rows
                 ]
-                new_tandas.extend(detect_tandas_for_playlist(playlist_id, tracks))
+                new_tandas.extend(detect_tandas_for_playlist(playlist_id, tracks, settings))
 
             for tanda in new_tandas:
                 cur = conn.execute(
@@ -466,16 +470,17 @@ class ImportNamedPlaylistsWorker(QThread):
     def run(self) -> None:
         try:
             conn = get_connection(self.db_path)
+            settings = load_settings(conn)
             total_imported = 0
 
             for i, name in enumerate(self.names, 1):
                 self.progress.emit(i, len(self.names), f"Importing '{name}'")
-                tracks_by_pid, playlists, _ = read_playlists_applescript(name)
+                tracks_by_pid, playlists, _ = read_playlists_applescript(name, settings=settings)
 
                 if not playlists:
                     continue
 
-                _upsert_tracks(conn, list(tracks_by_pid.values()))
+                _upsert_tracks(conn, list(tracks_by_pid.values()), settings=settings)
                 conn.commit()
 
                 pid_to_id: dict[str, int] = {
@@ -697,8 +702,10 @@ class NoiseDiagnosisWorker(QThread):
 # Helpers (mirrors of private importer functions, avoiding rich output)
 # ---------------------------------------------------------------------------
 
-def _upsert_tracks(conn, tracks) -> None:
-    from tanda_suggester.db import genre_family
+def _upsert_tracks(conn, tracks, settings=None) -> None:
+    if settings is None:
+        from tanda_suggester.settings import DEFAULT_SETTINGS
+        settings = DEFAULT_SETTINGS
     conn.executemany(
         """INSERT INTO tracks (music_app_id, title, artist, genre, genre_family, duration_seconds)
            VALUES (:pid, :title, :artist, :genre, :gf, :dur)
@@ -714,7 +721,7 @@ def _upsert_tracks(conn, tracks) -> None:
                 "title": t.title,
                 "artist": t.artist,
                 "genre": t.genre,
-                "gf": genre_family(t.genre),
+                "gf": classify_genre(t.genre, settings),
                 "dur": t.duration_seconds,
             }
             for t in tracks
