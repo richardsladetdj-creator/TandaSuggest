@@ -81,7 +81,7 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "TangoSuggest",
         "CFBundleDisplayName": "TangoSuggest",
-        "CFBundleShortVersionString": "0.1.0",
+        "CFBundleShortVersionString": "1.0.0",
         "CFBundleVersion": "1",
         "NSHighResolutionCapable": True,
         "NSRequiresAquaSystemAppearance": False,
